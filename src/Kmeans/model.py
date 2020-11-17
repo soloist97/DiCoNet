@@ -26,10 +26,10 @@ def gmul(input):
     N = W.size(-2)
     W = W.split(1, 3)
     W = W + (y.unsqueeze(3),)
-    W = torch.cat(W, 1).squeeze(3) # W is now a tensor of size (bs, J*N, N)
-    output = torch.bmm(W, x) # output has size (bs, J*N, num_features)
+    W = torch.cat(W, 1).squeeze(3) # W is now a tensor of size (bs, (J+1)*N, N) 所以J = 5 = 4 + 1
+    output = torch.bmm(W, x) # output has size (bs, (J+1)*N, num_features)
     output = output.split(N, 1)
-    output = torch.cat(output, 2) # output has size (bs, N, J*num_features)
+    output = torch.cat(output, 2) # output has size (bs, N, (J+1)*num_features)
     return output
 
 def bnorm(x, U):
@@ -42,6 +42,12 @@ def bnorm(x, U):
 
 class Gconv(nn.Module):
     def __init__(self, feature_maps, J, last=False):
+        """
+
+        :param feature_maps: list [input, output]
+        :param J: 默认5
+        :param last: bool
+        """
         super(Gconv, self).__init__()
         self.num_inputs = J*feature_maps[0] # we have J=3 matrixes: identity, mu (average) and "similitude" (learned)
         self.num_outputs = feature_maps[1]
@@ -52,6 +58,18 @@ class Gconv(nn.Module):
         self.gamma = nn.Parameter(torch.ones(self.num_outputs).type(dtype))
 
     def forward(self, input):
+        """
+
+        :param input: ([E; W'; DiagW; U], points, W')
+            W: [E; W'; DiagW; {1/N}] (bz, N, N, 4)
+                E: (bz, N, N) 初始时为Identity matrix
+                W': (bz, N, N) wij = exp(-dist2/sigma2)
+                DiagW: (bz, N, N) E * W.sum(2,True).expand(bz,N,N)
+                U: (bz, N, N) 初始时每个元素均为1/N
+            points: (bz, N, dim)
+        :return:
+        """
+        #TODO Try to understand what happen here and what W x Y means
         W, x, Y = input
         N = Y.size(-1)
         bs = Y.size(0)
@@ -65,12 +83,12 @@ class Gconv(nn.Module):
         #Y = (Y + Y.permute(0,2,1)) / 2
         #Y = Y * mask1
         
-        x = gmul((W, x, Y)) # out has size (bs, N, num_inputs)
+        x = gmul((W, x, Y)) # out has size (bs, N, (J+1)*num_inputs)
         x_size = x.size()
         x = x.contiguous()
         x = x.view(-1, self.num_inputs)
         if self.last:
-            x1 = self.fc1(x)
+            x1 = self.fc1(x)  # (bs*N, num_outputs // 2)
         else:
             x1 = F.sigmoid(self.fc1(x)) # has size (bs*N, num_outputs // 2)
         x2 = self.fc2(x)
@@ -105,6 +123,13 @@ class GNN(nn.Module):
 
 class Split_GNN(nn.Module):
     def __init__(self, num_features, num_layers, J, dim_input=1):
+        """
+
+        :param num_features: 默认32
+        :param num_layers: 默认20
+        :param J: 默认5
+        :param dim_input: 默认27
+        """
         super(Split_GNN, self).__init__()
         self.num_features = num_features
         self.Gnn = GNN(num_features, num_layers, J, dim_input)
@@ -114,8 +139,8 @@ class Split_GNN(nn.Module):
     def forward(self, input):
         W, x, Y = self.Gnn(input)
         bs = input[0].size(0)
-        x = x.view(-1,self.num_features)
-        prob_scores = self.linear_last1(x).view(bs, -1)
+        x = x.view(-1,self.num_features)  # (bz*N, 32)
+        prob_scores = self.linear_last1(x).view(bs, -1)  # (bz, N)
         vol_scores = self.linear_last2(x).view(bs, -1)
         return prob_scores, vol_scores
 
@@ -134,7 +159,7 @@ class Split_BaselineGNN(nn.Module):
         x = x.view(-1,self.num_features)
         prob_scores = self.linear_last1(x).view(bs, -1, 2**self.K)
         vol_scores = self.linear_last2(x).view(bs, -1, 2**self.K)
-        return prob_scores, vol_scores
+        return prob_scores, vol_scores  # (bz, N, 2^K)
 
 
 if __name__ == '__main__':

@@ -58,7 +58,7 @@ parser.add_argument('--normalize', action='store_true')
 
 args = parser.parse_args()
 
-args.save_file = '/home/anowak/DCN-for-KMEANS/model/exp1'
+# args.save_file = '/home/anowak/DCN-for-KMEANS/model/exp1'
 # args.load_file = '/home/anowak/DCN-for-KMEANS/model/exp1'
 
 if torch.cuda.is_available():
@@ -119,11 +119,21 @@ def plot_train_logs(cost_train):
     plt.ylabel('Average Mean cost')
     plt.title('Average Mean cost Training')
     plt.tight_layout(pad=0.4, w_pad=0.5, h_pad=2.0)
-    path = os.path.join('plots/logs', 'training.png') 
+    path = os.path.join('./plots/logs', 'training.png')
     plt.savefig(path)
 
 
 def plot_clusters(num, e, centers, points, fig, model):
+    """
+
+    :param num: 迭代次数
+    :param e: 点所属聚类中心编号 (bz, N) 0-indexed
+    :param centers: 聚类中心 None or (bz, #centers, dim)
+    :param points: 点 tensor (bz, N, dim)
+    :param fig: 绘制batch中第fig个图像
+    :param model: 模型名称
+    :return:
+    """
     plt.figure(0)
     plt.clf()
     plt.gca().set_xlim([-0.05,1.05])
@@ -133,7 +143,7 @@ def plot_clusters(num, e, centers, points, fig, model):
     for i in range(clusters):
         c = colors[i][:-1]
         mask = e[fig] == i
-        x = torch.masked_select(points[fig,:,0], mask)
+        x = torch.masked_select(points[fig,:,0], mask)  # 仅绘制0和1两个维度
         y = torch.masked_select(points[fig,:,1], mask)
         plt.plot(x.cpu().numpy(), y.cpu().numpy(), 'o', c=rgb2hex(c))
         if centers is not None:
@@ -145,18 +155,18 @@ def plot_clusters(num, e, centers, points, fig, model):
     
 
 def create_input(points, sigma2):
-    bs, N, _ = points.size() #points has size bs,N,2
+    bs, N, _ = points.size() #points has size bs, N, dim
     OP = torch.zeros(bs,N,N,4).type(dtype)
     E = torch.eye(N).type(dtype).unsqueeze(0).expand(bs,N,N)
     OP[:,:,:,0] = E
     W = points.unsqueeze(1).expand(bs,N,N,dim) - points.unsqueeze(2).expand(bs,N,N,dim)
     dists2 = (W * W).sum(3)
     dists = torch.sqrt(dists2)
-    W = torch.exp(-dists2 / sigma2)
+    W = torch.exp(-dists2 / sigma2)  # 注意这里是平方，原论文中wij = exp(-dist2/sigma2)，两点之间的关系特征
     OP[:,:,:,1] = W
-    D = E * W.sum(2,True).expand(bs,N,N)
+    D = E * W.sum(2,True).expand(bs,N,N)  # 对角线非零
     OP[:,:,:,2] = D
-    U = (torch.ones(N,N).type(dtype)/N).unsqueeze(0).expand(bs,N,N)
+    U = (torch.ones(N,N).type(dtype)/N).unsqueeze(0).expand(bs,N,N)  # 每个元素均为1/N
     OP[:,:,:,3] = U
     OP = Variable(OP)
     x = Variable(points)
@@ -171,11 +181,11 @@ def create_input(points, sigma2):
         x = x - mu_ext
         x = x/(10 * var_ext)
 
-    return (OP, x, Y), dists
+    return (OP, x, Y), dists  # ([E; W; DiagW; {1/N}], points, W), points之间的距离
 
 def sample_K(probs, K, mode='test'):
     probs = 1e-6 + probs*(1 - 2e-6) # to avoid log(0)
-    probs = probs.view(-1, 2**K)
+    probs = probs.view(-1, 2**K)  # (bz, N, 2^K)
     if mode == 'train':
         bin_sample = torch.multinomial(probs, 1).detach()
     else:
@@ -191,7 +201,7 @@ def sample_one(probs, mode='test'):
         rand = torch.zeros(*probs.size()).type(dtype)
         nn.init.uniform(rand)
     else:
-        rand = torch.ones(*probs.size()).type(dtype) / 2
+        rand = torch.ones(*probs.size()).type(dtype) / 2  # 测试时实际上是 >0.5 greedy
     bin_sample = probs > Variable(rand)
     sample = bin_sample.clone().type(dtype)
     log_probs_samples = (sample*torch.log(probs) + (1-sample)*torch.log(1-probs)).sum(1)
@@ -258,45 +268,55 @@ def compute_reward(e, K, points):
     reward2 = Variable(torch.zeros(bs).type(dtype))
     reward3 = Variable(torch.zeros(bs).type(dtype))
     c = []
-    for k in range(2**K):
-        mask = Variable((e == k).float()).unsqueeze(2).expand_as(points)
+    for k in range(2**K):  # 默认满二叉树
+        mask = Variable((e == k).float()).unsqueeze(2).expand_as(points)  # (bz, N, dim)
         N1 = mask.sum(1)
         center = points*mask
-        center = center.sum(1) / N1.clamp(min=1)
+        center = center.sum(1) / N1.clamp(min=1)  # (bz, dim)
         c.append(center[0])
-        subs = ((points-center.unsqueeze(1).expand_as(points)) * mask)
-        subs2 = (subs * subs).sum(2).sum(1) / N
+        subs = ((points-center.unsqueeze(1).expand_as(points)) * mask)  # (bz, N, dim)
+        subs2 = (subs * subs).sum(2).sum(1) / N  # (bz,)
         subs3 = torch.abs(subs * subs * subs).sum(2).sum(1) / N
         reward2 += subs2
         reward3 += subs3
     return reward2, reward3, c
 
 def execute(points, K, n_samples, sigma2, reg_factor, mode='test'):
+    """
+
+    :param points: (bz, N, dim)
+    :param K: 默认为2 K叉树
+    :param n_samples: Monte Carlo抽样次数 10
+    :param sigma2: 默认为1.
+    :param reg_factor: 默认为0.
+    :param mode: "train" or "test"
+    :return:
+    """
     bs, N, _ = points.size()
-    e = torch.zeros(bs, N).type(dtype_l)
-    input, dists = create_input(points.data, sigma2)
+    e = torch.zeros(bs, N).type(dtype_l)  # 聚类结果标签
+    input, dists = create_input(points.data, sigma2)  # ([E; W; DiagW; {1/N}], points, W), points之间的距离
     loss_total = Variable(torch.zeros(1).type(dtype))
-    for k in range(K):
-        scores,_ = gnn(input)
+    for k in range(K):  # 默认满二叉树 故每轮每个点都会被继续划分
+        scores,_ = gnn(input)  # 外部定义的模型 (bz, N)
         probs = F.sigmoid(scores)
-        if mode == 'train':
-            variance = compute_variance(e, probs)
+        if mode == 'train':  # 每一次划分集合都（可以）有reward指导
+            variance = compute_variance(e, probs)  # 论文中的SPLIT REGULARIZATION
             variance = variance.sum() / bs
-            Lgp = Variable(torch.zeros(n_samples, bs).type(dtype))
+            Lgp = Variable(torch.zeros(n_samples, bs).type(dtype))  #FIXME Lgp would only record the last split when last == True
             Reward2 = Variable(torch.zeros(n_samples, bs).type(dtype))
             Reward3 = Variable(torch.zeros(n_samples, bs).type(dtype))
             for i in range(n_samples):
-                Samplei, Lgp[i] = sample_one(probs, 'train')
+                Samplei, Lgp[i] = sample_one(probs, 'train')  # 在probs固定的情况下抽样n_samples次
                 Ei = e*2 + Samplei.long()
                 Reward2[i], _,_ = compute_reward(Ei, k+1, points)
             baseline = Reward2.mean(0,True).expand_as(Reward3)
             loss = 0.0
             if (last and k == K-1) or not last:
-                loss = ((Reward2-baseline) * Lgp).sum(1).sum(0) / n_samples / bs
+                loss = ((Reward2-baseline) * Lgp).sum(1).sum(0) / n_samples / bs  # baseline是n_samples抽样的平均
             loss_total = loss_total + loss - reg_factor*variance
             show_loss = Reward2.data.mean()
-        sample, lgp = sample_one(probs, 'test')
-        e = e*2 + sample.long()
+        sample, lgp = sample_one(probs, 'test')  # (bz, N)  (bz, )
+        e = e*2 + sample.long()  # 记录该轮划分结果
         reward,_,c = compute_reward(e, k+1, points)
         if mode == 'test':
             show_loss = reward.data.mean()
@@ -314,7 +334,7 @@ def execute_baseline(points, K, n_samples, sigma2, reg_factor, mode='test'):
     loss_total = Variable(torch.zeros(1).type(dtype))
     scores,_ = gnn(input)
     probs = F.softmax(scores.permute(2, 1, 0)).permute(2, 1, 0)
-    if mode == 'train':
+    if mode == 'train':  # 一步到位
         Lgp = Variable(torch.zeros(n_samples, bs).type(dtype))
         Reward2 = Variable(torch.zeros(n_samples, bs).type(dtype))
         Reward3 = Variable(torch.zeros(n_samples, bs).type(dtype))
@@ -349,8 +369,14 @@ def load_model(path, model):
 
 
 def Lloyds(input, n_clusters=8):
+    """常规的Kmeans 计算了与Split GNN相同的Cost
+
+    :param input: 点 (bz, N, dim) tensor
+    :param n_clusters: 聚类中心个数
+    :return:
+    """
     kmeans = KMeans(n_clusters=n_clusters)
-    nb_pbs, nb_samples, d = input.shape
+    nb_pbs, nb_samples, d = input.shape  # (bz, N, dim)
     Costs = []
     for i in range(nb_pbs):
         inp = input[i]
@@ -358,24 +384,33 @@ def Lloyds(input, n_clusters=8):
         cost = 0
         for cl in range(n_clusters):
             ind = np.where(labels==cl)[0]
-            if ind.shape[0] > 0:
-                x = inp[ind]
+            if ind.shape[0] > 0:  # 存在为cl的聚类中心
+                x = inp[ind]  # (n, dim)
                 mean = x.mean(axis=0)
-                cost += np.mean(np.sum((x - mean)**2, axis=1), axis=0)*ind.shape[0]
+                cost += np.mean(np.sum((x - mean)**2, axis=1), axis=0)*ind.shape[0]  # 论文中的 n * delta
                 # cost += np.var(inp[ind], axis=0)*ind.shape[0]
-    Costs.append(cost/nb_samples)
+        Costs.append(cost/nb_samples)  #FIXME bug fixed
     Cost = sum(Costs)/len(Costs)
     return Cost
 
 def Lloyds2(input, ind, E, k, K=2):
+    """
+
+    :param input: (N, dim)
+    :param ind: 用于确定点的子集
+    :param E: (N,) labels
+    :param k: 递归次数，可以理解为K叉树扩展了几层
+    :param K: K叉树，默认为2
+    :return:
+    """
     # split at first place
     inp = input[ind]
     if inp.shape[0] >= 2:
         kmeans = KMeans(n_clusters=2, max_iter=20)
-        labels = kmeans.fit_predict(inp)
+        labels = kmeans.fit_predict(inp)  # labels由0或1组成
     else:
-        labels = np.zeros(ind.shape[0])
-    E[ind] = 2*E[ind] + labels
+        labels = np.zeros(ind.shape[0])  # array([0])
+    E[ind] = 2*E[ind] + labels  # 类似于2进制, 00 01 10 11，第k位表示第k轮划分情，适合于满二叉树
     # recursion
     if k == K-1:
         return E
@@ -387,15 +422,21 @@ def Lloyds2(input, ind, E, k, K=2):
         return E
 
 def recursive_Lloyds(input, K=2):
+    """
+
+    :param input: 点 (bz, N, dim) tensor
+    :param K: 划分次数 最终的聚类中心为2^K 即叶节点个数
+    :return:
+    """
     n_clusters = 2**K
-    nb_pbs, nb_samples, d = input.shape
+    nb_pbs, nb_samples, d = input.shape  # (bz, N, dim)
     Costs = []
     Labels = []
-    for i in range(nb_pbs):
-        inp = input[i]
-        ind = np.arange(nb_samples)
+    for i in range(nb_pbs):  # 对于batch中每一组数据点
+        inp = input[i]  # (N, dim)
+        ind = np.arange(nb_samples)  # tensor([0, 1, ..., N-1])
         labels = np.zeros(nb_samples)
-        labels = Lloyds2(inp, ind, labels, 0, K=K)
+        labels = Lloyds2(inp, ind, labels, 0, K=K)  # 递归二分聚类
         Labels.append(labels)
         # pdb.set_trace()
         cost = 0
@@ -406,35 +447,35 @@ def recursive_Lloyds(input, K=2):
                 mean = x.mean(axis=0)
                 cost += np.mean(np.sum((x - mean)**2, axis=1), axis=0)*ind.shape[0]
                 # cost += np.var(inp[ind], axis=0)*ind.shape[0]
-        Costs.append(cost/nb_samples)
-    Cost = sum(Costs)/len(Costs)
-    Labels = np.reshape(Labels, [nb_pbs, nb_samples])
+        Costs.append(cost/nb_samples)  # 对N个点做个平均
+    Cost = sum(Costs)/len(Costs)  # 对batch size中所有点集做个平均
+    Labels = np.reshape(Labels, [nb_pbs, nb_samples])  # (bz, N)
     return Cost, Labels
 
 if __name__ == '__main__':
     
-    dim = args.dim
+    dim = args.dim  # 27
     num_examples_train = args.num_examples_train
     num_examples_test = args.num_examples_test
-    N = args.N
-    clusters = args.clusters
-    clip_grad_norm = args.clip_grad_norm
+    N = args.N  # 200
+    clusters = args.clusters  # 4
+    clip_grad_norm = args.clip_grad_norm  # 40
     batch_size = args.batch_size
-    num_features = args.num_features
-    num_layers = args.num_layers
-    sigma2 = args.sigma2
-    reg_factor = args.reg_factor
-    K = args.K
-    k_step = args.k_step
-    n_samples = args.n_samples
+    num_features = args.num_features  # 32
+    num_layers = args.num_layers  # 20
+    sigma2 = args.sigma2  # 1.
+    reg_factor = args.reg_factor  # 0.0
+    K = args.K  # 2  用于recursive lloyd
+    k_step = args.k_step  # 0
+    n_samples = args.n_samples  # 10
     normalize = args.normalize
     last = args.last
     baseline = args.baseline
     
     if args.dataset == 'GM':
-        gen = Generator('/data/anowak/dataset/', num_examples_train, num_examples_test, N, clusters, dim)
+        gen = Generator('./data', num_examples_train, num_examples_test, N, clusters, dim)
     elif args.dataset == "CIFAR":
-        gen = GeneratorCIFAR('/data/anowak/dataset/', num_examples_train, num_examples_test, N, clusters, dim)
+        gen = GeneratorCIFAR('./data', num_examples_train, num_examples_test, N, clusters, dim)
         dim = 27
     gen.load_dataset()
     num_iterations = 100000
@@ -459,8 +500,8 @@ if __name__ == '__main__':
         if it % 50 == 0:
             mode = 'test'
         batch = gen.sample_batch(batch_size, is_training=True)
-        points, target = batch
-        if k_step > 0:
+        points, target = batch  # (bz, N, dim)  (bz, N) tensors
+        if k_step > 0:  #FIXME what does k_step mean?
             k = min(K,1+it//k_step)
         else:
             k = K
@@ -477,10 +518,10 @@ if __name__ == '__main__':
             optimizer.step()
             
         # if not test:
-        if it%50 == 0:
+        if it%50 == 0:  # 当前mode == "test"
             elapsed = time.time()-start
             # print('iteration {}, var {}, loss {}, elapsed {}'.format(it, show_loss, loss.data.mean(), elapsed))
-            plot_clusters(it, e, c, points.data, 0, 'gnn')
+            plot_clusters(it, e, c, points.data, 0, 'gnn')  # 可视化Split GNN的效果
             #out1 = ['---', it, loss, w, wt, tw, elapsed]
             #print(template_train1.format(*info_train))
             #print(template_train2.format(*out1))
@@ -490,11 +531,11 @@ if __name__ == '__main__':
             cost_lloyd = Lloyds(points_np, n_clusters=clusters)
             cost_rec_lloyd, labels = recursive_Lloyds(points_np, K=K)
             labels = torch.from_numpy(labels).type(dtype_l)
-            plot_clusters(it, labels, None, points.data, 0, 'lloyds')
+            plot_clusters(it, labels, None, points.data, 0, 'lloyds')  # 可视化Recursive Lloyd的效果
             print('gnn: {:.5f}, lloyds: {:.5f}, rec_lloyds: {:.5f}, ratio_lloyd: {:.5f}'
                   'ratio_rec_lloyd: {:.5f}'
                   .format(show_loss, cost_lloyd, cost_rec_lloyd,
-                          show_loss/cost_lloyd, show_loss/cost_rec_lloyd))
+                          show_loss/cost_lloyd, show_loss/cost_rec_lloyd))  # Split GNN与lloyd方法的相对表现
             mode = 'train'
 
         if it%300 == 0:

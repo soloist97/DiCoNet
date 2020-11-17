@@ -40,11 +40,11 @@ class Generator():
         self.path_dataset = path_dataset
         self.num_examples_train = num_examples_train
         self.num_examples_test = num_examples_test
-        self.data_train = []
+        self.data_train = []  # 每一个元素是一个dict 带有 key "points" 和 "targets" 每个key对应一个numpy数组
         self.data_test = []
-        self.N = N
-        self.clusters = clusters
-        self.dim = dim
+        self.N = N  # 每个data sample里有几个点
+        self.clusters = clusters  # 每个data sample里有几个聚类中心 每个聚类中心生成了 N // clusters 个点
+        self.dim = dim  # 点向量的维度
     
     
     def gaussian_example(self, N, clusters):
@@ -97,12 +97,16 @@ class Generator():
                       .format(i, self.N))
 
     def load_dataset(self):
+        """
+        载入数据集（若无则构造）并存储在self.data_train和self.data_test中
+        :return:
+        """
         # load train dataset
         filename = 'KMEANS_GM{}_clusters{}_dim{}_train.np'.format(self.N, self.clusters, self.dim)
         path = os.path.join(self.path_dataset, filename)
         if os.path.exists(path):
             print('Reading training dataset at {}'.format(path))
-            self.data_train = np.load(open(path, 'rb'))
+            self.data_train = np.load(open(path, 'rb'), allow_pickle=True)
         else:
             print('Creating training dataset.')
             self.create_dataset_train()
@@ -113,7 +117,7 @@ class Generator():
         path = os.path.join(self.path_dataset, filename)
         if os.path.exists(path):
             print('Reading testing dataset at {}'.format(path))
-            self.data_test = np.load(open(path, 'rb'))
+            self.data_test = np.load(open(path, 'rb'), allow_pickle=True)
         else:
             print('Creating testing dataset.')
             self.create_dataset_test()
